@@ -97,14 +97,17 @@ const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const connection = navigator.connection;
 const mediaControllers = [];
 
-// Une description stable pour les lecteurs d’écran, un déchiffrage visuel au survol.
-document.querySelectorAll('.project-tile').forEach(tile => {
+// La copie accessible reste intacte ; chaque mot conserve sa largeur pendant le décryptage.
+function initializeTileDescription(tile) {
   const text = tile.querySelector('.tile-scramble');
   if (!text) return;
   const description = text.textContent;
-  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#%+/?';
+  const finePointer = window.matchMedia('(hover: hover) and (pointer: fine)');
   let frame = null;
   let active = false;
+  let hovered = false;
+  let focused = false;
   function finish() {
     if (frame !== null) cancelAnimationFrame(frame);
     frame = null;
@@ -114,19 +117,44 @@ document.querySelectorAll('.project-tile').forEach(tile => {
     if (active) return;
     active = true;
     finish();
-    if (reducedMotion.matches || !window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
-    const start = performance.now();
+    if (reducedMotion.matches || !finePointer.matches) return;
+    const words = [];
+    let offset = 0;
+    const fragment = document.createDocumentFragment();
+    description.split(/(\s+)/u).forEach(word => {
+      if (!word) return;
+      if (/^\s+$/u.test(word)) fragment.append(document.createTextNode(word));
+      else {
+        const wrapper = document.createElement('span');
+        wrapper.className = 'scramble-word';
+        const source = document.createElement('span');
+        source.className = 'scramble-word-source';
+        source.textContent = word;
+        const value = document.createElement('span');
+        value.className = 'scramble-word-value';
+        value.textContent = word;
+        wrapper.append(source, value);
+        fragment.append(wrapper);
+        words.push({ value, word, offset });
+      }
+      offset += word.length;
+    });
+    text.replaceChildren(fragment);
+    const start = performance.now() + 100;
     let lastUpdate = -Infinity;
     function update(now) {
-      const progress = Math.min((now - start) / 800, 1);
+      if (now < start) { frame = requestAnimationFrame(update); return; }
+      const progress = Math.min((now - start) / 750, 1);
       if (progress === 1) { finish(); return; }
       if (now - lastUpdate >= 45) {
         const resolved = Math.floor(progress * description.length);
-        text.textContent = Array.from(description, (character, index) => {
-          if (index < resolved || !/[\p{L}\p{N}]/u.test(character)) return character;
-          const random = characters[Math.floor(Math.random() * characters.length)];
-          return character === character.toLowerCase() ? random.toLowerCase() : random;
-        }).join('');
+        words.forEach(({ value, word, offset }) => {
+          value.textContent = Array.from(word, (character, index) => {
+            if (offset + index < resolved || !/[\p{L}\p{N}]/u.test(character)) return character;
+            const random = characters[Math.floor(Math.random() * characters.length)];
+            return character === character.toLowerCase() ? random.toLowerCase() : random;
+          }).join('');
+        });
         lastUpdate = now;
       }
       frame = requestAnimationFrame(update);
@@ -134,17 +162,24 @@ document.querySelectorAll('.project-tile').forEach(tile => {
     frame = requestAnimationFrame(update);
   }
   function leave() {
-    if (tile.matches(':hover') || tile.contains(document.activeElement)) return;
+    if (hovered || focused) return;
     active = false;
     finish();
   }
-  tile.addEventListener('pointerenter', reveal);
-  tile.addEventListener('pointerleave', leave);
-  tile.addEventListener('focusin', reveal);
-  tile.addEventListener('focusout', leave);
+  tile.addEventListener('pointerenter', event => {
+    if (event.pointerType === 'touch' || !finePointer.matches) return;
+    hovered = true;
+    reveal();
+  });
+  tile.addEventListener('pointerleave', () => { hovered = false; leave(); });
+  tile.addEventListener('pointercancel', () => { hovered = false; leave(); });
+  tile.addEventListener('focusin', () => { focused = true; reveal(); });
+  tile.addEventListener('focusout', event => { focused = tile.contains(event.relatedTarget); leave(); });
   reducedMotion.addEventListener('change', finish);
+  finePointer.addEventListener('change', finish);
   document.addEventListener('visibilitychange', () => { if (document.hidden) finish(); });
-});
+}
+document.querySelectorAll('.project-tile').forEach(initializeTileDescription);
 
 // Panneaux de l’accueil : dialogues natifs, Échap et restitution du focus.
 const dialogs = [...document.querySelectorAll('.info-dialog')];
@@ -229,6 +264,7 @@ function createMediaController(panel, config) {
   let video = null;
   let playPending = false;
   let timer = null;
+  let nextSlideAt = 0;
   let slidePending = false;
   let photoIndex = 0;
   let activeSlot = 0;
@@ -288,22 +324,27 @@ function createMediaController(panel, config) {
   }
   function scheduleSlide() {
     if (timer || slidePending || slots.length < 2 || !shouldRun()) return;
+    if (!nextSlideAt) nextSlideAt = performance.now() + 5000;
+    const nextIndex = (photoIndex + 1) % photos.length;
+    // Précharger pendant la lecture de l’image courante, avant le prochain fondu.
+    const nextImage = loadImage(photos[nextIndex]).catch(() => null);
     timer = window.setTimeout(async () => {
       timer = null;
       slidePending = true;
-      const nextIndex = (photoIndex + 1) % photos.length;
       try {
-        const image = await loadImage(photos[nextIndex]);
+        const image = await nextImage;
         if (!shouldRun()) return;
+        if (!image) throw new Error('Image indisponible');
         const nextSlot = 1 - activeSlot;
         slots[nextSlot].src = image.src;
         slots[nextSlot].classList.add('is-active');
         slots[activeSlot].classList.remove('is-active');
         activeSlot = nextSlot;
         photoIndex = nextIndex;
+        do { nextSlideAt += 5000; } while (nextSlideAt <= performance.now());
       } catch { showError('Photo indisponible. La dernière image reste affichée.'); }
       finally { slidePending = false; scheduleSlide(); }
-    }, 5000);
+    }, Math.max(0, nextSlideAt - performance.now()));
   }
   function prepareVideo() {
     if (video) return;
@@ -337,14 +378,18 @@ function createMediaController(panel, config) {
     stage.append(video);
   }
   function sync() {
-    if (timer) { window.clearTimeout(timer); timer = null; }
     if (detail) {
       if (!visible || document.hidden) { if (video) video.pause(); return; }
       // Lecteur natif sur la page détaillée : démarrage uniquement par le visiteur.
       if (videoPath) prepareVideo();
       return;
     }
-    if (!shouldRun()) { if (video) video.pause(); return; }
+    if (!shouldRun()) {
+      if (timer) { window.clearTimeout(timer); timer = null; }
+      nextSlideAt = 0;
+      if (video) video.pause();
+      return;
+    }
     if (videoPath) {
       prepareVideo();
       if (playPending || !video.paused) return;
