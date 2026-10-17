@@ -97,6 +97,55 @@ const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const connection = navigator.connection;
 const mediaControllers = [];
 
+// Une description stable pour les lecteurs d’écran, un déchiffrage visuel au survol.
+document.querySelectorAll('.project-tile').forEach(tile => {
+  const text = tile.querySelector('.tile-scramble');
+  if (!text) return;
+  const description = text.textContent;
+  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let frame = null;
+  let active = false;
+  function finish() {
+    if (frame !== null) cancelAnimationFrame(frame);
+    frame = null;
+    text.textContent = description;
+  }
+  function reveal() {
+    if (active) return;
+    active = true;
+    finish();
+    if (reducedMotion.matches || !window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+    const start = performance.now();
+    let lastUpdate = -Infinity;
+    function update(now) {
+      const progress = Math.min((now - start) / 800, 1);
+      if (progress === 1) { finish(); return; }
+      if (now - lastUpdate >= 45) {
+        const resolved = Math.floor(progress * description.length);
+        text.textContent = Array.from(description, (character, index) => {
+          if (index < resolved || !/[\p{L}\p{N}]/u.test(character)) return character;
+          const random = characters[Math.floor(Math.random() * characters.length)];
+          return character === character.toLowerCase() ? random.toLowerCase() : random;
+        }).join('');
+        lastUpdate = now;
+      }
+      frame = requestAnimationFrame(update);
+    }
+    frame = requestAnimationFrame(update);
+  }
+  function leave() {
+    if (tile.matches(':hover') || tile.contains(document.activeElement)) return;
+    active = false;
+    finish();
+  }
+  tile.addEventListener('pointerenter', reveal);
+  tile.addEventListener('pointerleave', leave);
+  tile.addEventListener('focusin', reveal);
+  tile.addEventListener('focusout', leave);
+  reducedMotion.addEventListener('change', finish);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) finish(); });
+});
+
 // Panneaux de l’accueil : dialogues natifs, Échap et restitution du focus.
 const dialogs = [...document.querySelectorAll('.info-dialog')];
 let lastTrigger = null;
@@ -254,7 +303,7 @@ function createMediaController(panel, config) {
         photoIndex = nextIndex;
       } catch { showError('Photo indisponible. La dernière image reste affichée.'); }
       finally { slidePending = false; scheduleSlide(); }
-    }, 6000);
+    }, 5000);
   }
   function prepareVideo() {
     if (video) return;
